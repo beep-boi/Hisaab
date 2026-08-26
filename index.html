@@ -298,6 +298,7 @@ body.night .seg button.on{background:rgba(255,255,255,.1)}
 .seg button.on.t-rent{color:var(--brass)}
 .seg button.on.t-expense{color:var(--verm)}
 .seg button.on.t-given{color:var(--teal)}
+.seg button.on.t-received{color:var(--brass)}
 
 .amt{text-align:center;padding:16px 0 6px}
 .amt .n{font-family:'Bodoni Moda',Georgia,serif;font-size:46px;line-height:1;font-weight:500;
@@ -351,6 +352,20 @@ select.inp{-webkit-appearance:none;appearance:none}
   display:flex;transition:background .2s}
 .tgl.on{background:var(--teal);justify-content:flex-end}
 .tgl i{display:block;width:22px;height:22px;border-radius:999px;background:#fff;box-shadow:var(--soft)}
+
+.cf-scrim{z-index:80}
+.cfbox{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:81;
+  width:min(340px,86vw);background:var(--ink2);border:1px solid var(--cardline);
+  border-radius:22px;padding:24px 21px 19px;box-shadow:0 14px 44px var(--shadow);
+  animation:pop .18s cubic-bezier(.2,.9,.3,1)}
+@keyframes pop{from{opacity:0;transform:translate(-50%,-46%) scale(.96)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
+.cfbox h4{font-family:'Bodoni Moda',Georgia,serif;font-size:20px;font-weight:500;margin:0 0 9px;letter-spacing:-.01em}
+.cfbox p{font-size:13px;color:var(--muted);margin:0 0 20px;line-height:1.55}
+.cfrow{display:flex;gap:9px}
+.cfrow button{flex:1;padding:14px 8px;border-radius:14px;font-size:13.5px;font-weight:600}
+.cfno{background:var(--ink3);border:1px solid var(--cardline);color:var(--paper)}
+.cfyes{background:var(--verm);color:#fff;font-weight:700}
+.cfyes:active,.cfno:active{transform:scale(.97)}
 
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(154px + env(safe-area-inset-bottom));
   z-index:70;padding:12px 20px;border-radius:999px;color:var(--ink);font-size:13px;font-weight:600;
@@ -411,7 +426,7 @@ function store(k,v){try{localStorage.setItem(k,JSON.stringify(v));return true}ca
 var DEFAULT_CFG={people:['Absaar','Ammar'],categories:PRESET_CATS.slice(),properties:[],givenIsSpend:false};
 
 var S={cfg:DEFAULT_CFG,entries:[],tab:'balance',month:mKey(todayISO()),
-  sheet:null,setup:false,openRow:null,propSheet:null,unitSheet:null,toast:'',light:false};
+  sheet:null,setup:false,openRow:null,propSheet:null,unitSheet:null,confirm:null,toast:'',light:false};
 
 function pull(){
   var c=load(K_CFG,null),e=load(K_ENT,[]);
@@ -434,32 +449,90 @@ function syncAvailable(){return !!(window.HisaabSync&&window.HisaabSync.enabled)
 var TOMB=load('hisaab:tomb',{});   // { id: _m }
 function saveTomb(){store('hisaab:tomb',TOMB)}
 
+// recently-deleted bin: entries stay recoverable for a week
+var TRASH_DAYS=7, TRASH_MS=TRASH_DAYS*86400000;
+var TRASH=load('hisaab:trash',[]);
+function saveTrash(){store('hisaab:trash',TRASH)}
+function tooOld(t){return !t||(Date.now()-t)>TRASH_MS}
+function pruneTrash(){
+  var before=TRASH.length;
+  TRASH=TRASH.filter(function(e){return !tooOld(e._delAt)});
+  if(TRASH.length!==before)saveTrash();
+}
+
+function trashEntry(id){
+  var e=null;S.entries.forEach(function(x){if(x.id===id)e=x});
+  var now=Date.now();
+  TOMB[id]=now;
+  if(e){var c={};for(var k in e)c[k]=e[k];c._delAt=now;c._m=now;TRASH.push(c);}
+  S.entries=S.entries.filter(function(x){return x.id!==id});
+  saveTomb();saveTrash();
+  if(SYNC.on&&syncAvailable()&&SYNC.user&&e){
+    var d={};for(var k2 in e)d[k2]=e[k2];
+    d._deleted=true;d._delAt=now;d._m=now;
+    var o={};o['entries/'+id]=d;window.HisaabSync.push(o);
+  }
+}
+
+function restoreEntry(id){
+  var e=null;TRASH.forEach(function(x){if(x.id===id)e=x});
+  if(!e)return false;
+  TRASH=TRASH.filter(function(x){return x.id!==id});
+  delete TOMB[id];
+  var c={};for(var k in e)c[k]=e[k];
+  delete c._delAt;delete c._deleted;c._m=Date.now();
+  S.entries.push(c);
+  saveTomb();saveTrash();saveEnt();
+  return true;
+}
+
+function purgeEntry(id){
+  TRASH=TRASH.filter(function(x){return x.id!==id});
+  TOMB[id]=Date.now();
+  saveTrash();saveTomb();
+  if(SYNC.on&&syncAvailable()&&SYNC.user){
+    var o={};o['entries/'+id]={_deleted:true,_m:TOMB[id],_purged:true};
+    window.HisaabSync.push(o);
+  }
+}
+
 function mergeRemote(remote){
   if(!remote)return false;
   var changed=false;
   var rEnt=remote.entries||{};
   var byId={};S.entries.forEach(function(e){byId[e.id]=e});
+  var inTrash={};TRASH.forEach(function(e){inTrash[e.id]=e});
   Object.keys(rEnt).forEach(function(id){
     var re=rEnt[id]; if(!re)return;
     if(re._deleted){
-      // record tombstone; drop local copy if present
       if(!TOMB[id]||(re._m||0)>TOMB[id]){TOMB[id]=re._m||Date.now();changed=true;}
       if(byId[id]){S.entries=S.entries.filter(function(e){return e.id!==id});changed=true;}
+      if(re._purged){
+        if(inTrash[id]){TRASH=TRASH.filter(function(e){return e.id!==id});changed=true;}
+      }else if(!inTrash[id]&&re.type&&!tooOld(re._delAt)){
+        var c={};for(var k in re)c[k]=re[k];delete c._deleted;
+        TRASH.push(c);changed=true;
+      }
       return;
     }
-    // if we've tombstoned this id at or after the incoming edit, ignore the resurrection
+    // a live record newer than our tombstone means it was restored on the other phone
     if(TOMB[id]&&TOMB[id]>=(re._m||0))return;
+    if(TOMB[id]){
+      delete TOMB[id];
+      if(inTrash[id])TRASH=TRASH.filter(function(e){return e.id!==id});
+      changed=true;
+    }
     var le=byId[id];
     if(!le){ S.entries.push(re);changed=true; }
-    else if((re._m||0)>(le._m||0)){ for(var k in re)le[k]=re[k];changed=true; }
+    else if((re._m||0)>(le._m||0)){ for(var k2 in re)le[k2]=re[k2];changed=true; }
   });
   if(remote.config&&(remote.config._m||0)>((S.cfg._m)||0)){
-    var c=remote.config;
-    S.cfg={people:c.people||S.cfg.people,categories:c.categories||S.cfg.categories,
-      properties:c.properties||S.cfg.properties,givenIsSpend:!!c.givenIsSpend,_m:c._m||0};
+    var cf=remote.config;
+    S.cfg={people:cf.people||S.cfg.people,categories:cf.categories||S.cfg.categories,
+      properties:cf.properties||S.cfg.properties,givenIsSpend:!!cf.givenIsSpend,_m:cf._m||0};
     changed=true;
   }
-  if(changed){store(K_ENT,S.entries);store(K_CFG,S.cfg);saveTomb();}
+  if(changed){store(K_ENT,S.entries);store(K_CFG,S.cfg);saveTomb();saveTrash();}
   return changed;
 }
 
@@ -482,20 +555,19 @@ function doPush(){
   var payload={};
   // write each live entry at its own path (never blows away others' entries)
   S.entries.forEach(function(e){ if(!e._m)e._m=now; payload['entries/'+e.id]=e; });
-  // re-assert known tombstones so a peer's stale copy stays dead
-  Object.keys(TOMB).forEach(function(id){ payload['entries/'+id]={_deleted:true,_m:TOMB[id]}; });
+  // re-assert deletions so a peer's stale copy stays dead; trashed ones keep their data
+  var trashById={};TRASH.forEach(function(e){trashById[e.id]=e});
+  Object.keys(TOMB).forEach(function(id){
+    var t=trashById[id];
+    if(t){var d={};for(var k in t)d[k]=t[k];d._deleted=true;d._m=TOMB[id];payload['entries/'+id]=d;}
+    else payload['entries/'+id]={_deleted:true,_m:TOMB[id],_purged:true};
+  });
   payload['config']={people:S.cfg.people,categories:S.cfg.categories,properties:S.cfg.properties,
     givenIsSpend:!!S.cfg.givenIsSpend,_m:S.cfg._m||now};
   store(K_ENT,S.entries);store(K_CFG,S.cfg);
   window.HisaabSync.push(payload);
 }
 
-function syncTomb(id){
-  TOMB[id]=Date.now();saveTomb();
-  if(!SYNC.on||!syncAvailable()||!SYNC.user)return;
-  var o={}; o['entries/'+id]={_deleted:true,_m:TOMB[id]};
-  window.HisaabSync.push(o);
-}
 function syncStart(){
   if(!syncAvailable())return;
   window.__hisaabRemote=remoteHandler;
@@ -514,7 +586,7 @@ function ping(m){S.toast=m;renderToast();clearTimeout(toastTimer);
 
 function sortedEntries(){return S.entries.slice().sort(function(a,b){
   if(a.date===b.date)return(a.ts||0)-(b.ts||0);return a.date<b.date?-1:1})}
-function delta(e){if(e.type==='rent')return e.amount;if(e.type==='expense')return -e.amount;
+function delta(e){if(e.type==='rent'||e.type==='received')return e.amount;if(e.type==='expense')return -e.amount;
   return S.cfg.givenIsSpend?-e.amount:0}
 function computeBalances(){var l=sortedEntries(),r=0,m={};
   for(var i=0;i<l.length;i++){r+=delta(l[i]);m[l[i].id]=r}return{list:l,pool:r,map:m}}
@@ -550,14 +622,21 @@ function emptyBox(t,l,a,c){return '<div class="empty">'
   +'<h4>'+esc(t)+'</h4><p>'+esc(l)+'</p>'
   +(a?'<button class="cta" data-a="'+a+'">'+esc(c||'Add an entry')+'</button>':'')+'</div>'}
 
+function entryTitle(e){
+  return e.type==='rent'?((e.unitLabel||'Rent')+(e.tenant?' \u00b7 '+e.tenant:''))
+    :e.type==='received'?('Received from '+(e.person||'someone'))
+    :(e.type==='given'?'To '+(e.person||''):(e.category||'Uncategorised'));
+}
+
 function ledgerRow(e,balance){
   var d=e.date||'',open=S.openRow===e.id;
-  var cls=e.type==='rent'?'in':(e.type==='given'?'mv':'out');
-  var sign=e.type==='rent'?'+':(e.type==='given'?'\u2192':'\u2212');
-  var title=e.type==='rent'?((e.unitLabel||'Rent')+(e.tenant?' \u00b7 '+e.tenant:''))
-    :(e.type==='given'?'To '+(e.person||''):(e.category||'Uncategorised'));
+  var cls=(e.type==='rent'||e.type==='received')?'in':(e.type==='given'?'mv':'out');
+  var sign=(e.type==='rent'||e.type==='received')?'+':(e.type==='given'?'\u2192':'\u2212');
+  var title=entryTitle(e);
   var bits=[];
-  if(e.type==='rent'){if(e.propName)bits.push(e.propName)}else if(e.person)bits.push(e.person);
+  if(e.type==='rent'){if(e.propName)bits.push(e.propName)}
+  else if(e.type==='received'){ /* person already named in title */ }
+  else if(e.person)bits.push(e.person);
   if(e.mode)bits.push(e.mode); if(e.note)bits.push(e.note);
   var right=open
     ?'<div class="rowbtns">'
@@ -575,7 +654,7 @@ function ledgerRow(e,balance){
 function viewBalance(){
   var b=computeBalances(),pool=b.pool;
   var ml=b.list.filter(function(e){return mKey(e.date)===S.month});
-  var mIn=sumType(ml,'rent'),mOut=sumType(ml,'expense')+(S.cfg.givenIsSpend?sumType(ml,'given'):0);
+  var mIn=sumType(ml,'rent')+sumType(ml,'received'),mOut=sumType(ml,'expense')+(S.cfg.givenIsSpend?sumType(ml,'given'):0);
   var rs=rentStatus(S.month);
   var pct=rs.expected>0?Math.min(100,(rs.got/rs.expected)*100):(rs.total>0?(rs.count/rs.total)*100:0);
   var day=new Date().getDate(),isNow=S.month===mKey(todayISO()),mn=MON[+S.month.slice(5,7)-1];
@@ -663,7 +742,7 @@ function viewSpend(){
   var top=cats.length?cats[0][1]:1;
   var keys=[],k=S.month;for(var i=0;i<6;i++){keys.unshift(k);k=shiftM(k,-1)}
   var months=keys.map(function(key){var set=all.filter(function(e){return mKey(e.date)===key});
-    return{key:key,inn:sumType(set,'rent'),out:sumType(set,'expense')+(S.cfg.givenIsSpend?sumType(set,'given'):0)}});
+    return{key:key,inn:sumType(set,'rent')+sumType(set,'received'),out:sumType(set,'expense')+(S.cfg.givenIsSpend?sumType(set,'given'):0)}});
   var peak=1;months.forEach(function(m){peak=Math.max(peak,m.inn,m.out)});
 
   var h='<div class="wrap" style="padding-top:20px">'
@@ -696,8 +775,17 @@ function viewSpend(){
 
 function viewGiven(){
   var all=sortedEntries();
-  var h='<div class="wrap" style="padding-top:20px"><div class="hero-lbl"><span class="eyebrow">Money handed over</span></div>'
-   +'<div style="font-size:12.5px;color:var(--muted);margin:4px 0 18px">Cash moving between the two of you \u2014 and what\u2019s still unspent.</div>';
+  var h='<div class="wrap" style="padding-top:20px"><div class="hero-lbl"><span class="eyebrow">Money in &amp; out with people</span></div>'
+   +'<div style="font-size:12.5px;color:var(--muted);margin:4px 0 18px">Cash moving between the two of you, plus money that comes in from outside \u2014 like a top-up from your mum.</div>';
+
+  var recList=all.filter(function(e){return e.type==='received'});
+  var recAll=recList.reduce(function(s,e){return s+e.amount},0);
+  var recMonth=recList.filter(function(e){return mKey(e.date)===S.month}).reduce(function(s,e){return s+e.amount},0);
+  h+='<div class="card coll" style="margin-bottom:22px"><div class="coll-top"><b>Received into the pool</b>'
+   +'<span class="n mono">this month \u00b7 \u20b9'+inr(recMonth)+'</span></div>'
+   +'<div class="hero-num in" style="font-size:34px;margin-top:2px"><span class="r">\u20b9</span>'+inr(recAll)+'</div>'
+   +'<div class="coll-note">All-time total \u2014 this adds straight to your balance, the same way rent does.</div></div>';
+
   S.cfg.people.forEach(function(p){
     var got=0,spent=0;
     all.forEach(function(e){if(e.type==='given'&&e.person===p)got+=e.amount;
@@ -711,7 +799,14 @@ function viewGiven(){
   h+='<div class="hintbox" style="margin-top:6px">'
    +(S.cfg.givenIsSpend?'<b>Given counts as spend.</b> Handing over cash lowers the balance right away, so don\u2019t log the same money again as an expense.'
      :'<b>Given doesn\u2019t change the balance.</b> The cash has only changed hands. The balance drops when it\u2019s logged as an expense \u2014 so nothing gets counted twice.')
+   +' <b>Received always adds to the balance</b> \u2014 use it whenever real money comes in from outside the two of you, like a top-up from your mum, and it\u2019ll offset your logged spending automatically.'
    +'</div>';
+
+  h+='<div class="sect"><div class="sect-hd"><span class="eyebrow">Every top-up received</span></div>'
+   +(recList.length===0?emptyBox('Nothing received yet','Log money that comes in from outside \u2014 like a top-up from your mum.','add-received','Add received money')
+     :'<div class="ledger">'+recList.slice().reverse().map(function(e){return ledgerRow(e)}).join('')+'</div>')
+   +'</div>';
+
   var list=all.filter(function(e){return e.type==='given'}).reverse();
   h+='<div class="sect"><div class="sect-hd"><span class="eyebrow">Every handover</span></div>'
    +(list.length===0?emptyBox('No money handed over yet','Log it when you pass cash to each other.','add-given')
@@ -739,8 +834,8 @@ function sheetView(){
 
   h+='<div class="sheet-top">';
   if(!sh.edit){
-    h+='<div class="seg">'+['expense','rent','given'].map(function(t){
-      var l=t==='expense'?'Expense':(t==='rent'?'Rent in':'Money given');
+    h+='<div class="seg">'+['expense','rent','given','received'].map(function(t){
+      var l=t==='expense'?'Expense':(t==='rent'?'Rent in':(t==='given'?'Given':'Received'));
       return '<button class="'+(sh.type===t?'on t-'+t:'')+'" data-a="sheet-type" data-v="'+t+'">'+l+'</button>'}).join('')+'</div>';
   }
   h+='<div class="amt"><div class="n'+(sh.amt?'':' z')+'" id="amtN"><span class="r">\u20b9</span>'
@@ -759,7 +854,8 @@ function sheetView(){
           +esc(x.propName+' \u00b7 '+x.label+(x.tenant?' \u2014 '+x.tenant:''))+'</option>'}).join('')+'</select>';
     h+='</div>';
   }else{
-    h+='<div class="fld"><label>'+(sh.type==='given'?'Given to':'Spent by')+'</label><div class="chips" data-grp="person">'
+    var plabel=sh.type==='given'?'Given to':(sh.type==='received'?'Received from':'Spent by');
+    h+='<div class="fld"><label>'+plabel+'</label><div class="chips" data-grp="person">'
      +S.cfg.people.map(function(p){return '<button class="chip'+(sh.person===p?' on':'')+'" data-a="person" data-v="'+esc(p)+'">'+esc(p)+'</button>'}).join('')
      +'</div></div>';
   }
@@ -852,6 +948,35 @@ function unitSheetView(){
    +(isNew?'Add unit':'Save changes')+'</button></div></div>';
   return h}
 
+function confirmView(){
+  var c=S.confirm;
+  return '<div class="scrim cf-scrim" data-a="cf-no"></div>'
+   +'<div class="cfbox" role="dialog" aria-modal="true">'
+   +'<h4>'+esc(c.title)+'</h4><p>'+esc(c.msg)+'</p>'
+   +'<div class="cfrow"><button class="cfno" data-a="cf-no">Cancel</button>'
+   +'<button class="cfyes" data-a="cf-yes">'+esc(c.label||'Delete')+'</button></div></div>';
+}
+
+function doConfirmed(c){
+  if(c.act==='row-del'){
+    trashEntry(c.val);S.openRow=null;saveEnt();renderAll();ping('Moved to Recently deleted');
+  }else if(c.act==='unit-undo'){
+    trashEntry(c.val);saveEnt();renderAll();ping('Rent entry removed');
+  }else if(c.act==='us-del'){
+    var z=c.val.split('|');
+    S.cfg.properties.forEach(function(p){if(p.id===z[0])p.units=(p.units||[]).filter(function(u){return u.id!==z[1]})});
+    saveCfg();S.unitSheet=null;renderOverlay(false);renderApp();ping('Unit deleted');
+  }else if(c.act==='ps-del'){
+    S.cfg.properties=S.cfg.properties.filter(function(p){return p.id!==c.val});
+    saveCfg();S.propSheet=null;renderOverlay(false);renderApp();ping('Estate deleted');
+  }else if(c.act==='trash-purge'){
+    purgeEntry(c.val);renderOverlay(false);ping('Deleted for good');
+  }else if(c.act==='trash-empty'){
+    TRASH.slice().forEach(function(e){purgeEntry(e.id)});
+    renderOverlay(false);ping('Bin emptied');
+  }
+}
+
 /* --------------------------- setup sheet --------------------------- */
 function setupView(){
   var h='<div class="scrim" data-a="setup-close"></div><div class="sheet anim" role="dialog">'
@@ -883,11 +1008,39 @@ function setupView(){
   h+='</div><div style="display:flex;gap:7px;margin-top:9px"><input class="inp" id="person-name" placeholder="Add a name">'
    +'<button class="chip on" style="padding:0 18px" data-a="person-add">Add</button></div></div>';
 
+  h+='<div class="fld"><label>Categories</label><div class="card" style="padding:4px 14px">';
+  if(!S.cfg.categories.length)h+='<div style="padding:14px 0;font-size:12.5px;color:var(--muted)">No categories yet.</div>';
+  S.cfg.categories.forEach(function(c){
+    h+='<div class="setrow"><div class="bd"><b>'+esc(c)+'</b></div>'
+     +'<button class="x" data-a="cat-del" data-v="'+esc(c)+'" aria-label="Remove category">'+I.xS+'</button></div>'});
+  h+='</div><div style="display:flex;gap:7px;margin-top:9px"><input class="inp" id="cat-name" placeholder="Add a category">'
+   +'<button class="chip on" style="padding:0 18px" data-a="cat-add">Add</button></div>'
+   +'<div class="hintbox" style="margin-top:9px">Deleting a category only removes it from this list \u2014 past expenses keep the name they were logged with.</div></div>';
+
   h+='<div class="fld"><label>How \u201cmoney given\u201d is treated</label>'
    +'<div class="card" style="padding:13px 15px;display:flex;align-items:center;gap:13px">'
    +'<div style="flex:1"><b style="font-size:14px;font-weight:600">Count it as spend</b>'
    +'<div style="font-size:11.5px;color:var(--muted);margin-top:3px">Off: handing cash over doesn\u2019t move the balance \u2014 only the expense does. On: the balance drops the moment cash changes hands.</div></div>'
    +'<button class="tgl'+(S.cfg.givenIsSpend?' on':'')+'" data-a="toggle-given" aria-label="Toggle"><i></i></button></div></div>';
+
+  pruneTrash();
+  h+='<div class="fld"><label>Recently deleted</label>';
+  if(!TRASH.length){
+    h+='<div class="hintbox">Nothing deleted recently. Anything you remove waits here for '+TRASH_DAYS+' days so it can be put back.</div>';
+  }else{
+    h+='<div class="card" style="padding:4px 14px">';
+    TRASH.slice().sort(function(a,b){return (b._delAt||0)-(a._delAt||0)}).forEach(function(e){
+      var days=Math.max(0,TRASH_DAYS-Math.floor((Date.now()-(e._delAt||0))/86400000));
+      var sgn=(e.type==='rent'||e.type==='received')?'+':(e.type==='given'?'\u2192':'\u2212');
+      h+='<div class="setrow"><div class="bd"><b>'+esc(entryTitle(e))+'</b><s>'
+       +sgn+'\u20b9'+inr(e.amount)+' \u00b7 '+esc(e.date||'')+' \u00b7 '+days+(days===1?' day left':' days left')+'</s></div>'
+       +'<button class="x" data-a="trash-restore" data-v="'+e.id+'" aria-label="Restore">'+I.rotate+'</button>'
+       +'<button class="x" data-a="trash-purge" data-v="'+e.id+'" aria-label="Delete for good">'+I.trash+'</button></div>';
+    });
+    h+='</div><button class="chip" style="width:100%;padding:13px;margin-top:9px;color:var(--verm)" data-a="trash-empty">Empty the bin</button>'
+     +'<div class="hintbox" style="margin-top:9px">Deleted entries stay recoverable for '+TRASH_DAYS+' days on both phones, then clear themselves.</div>';
+  }
+  h+='</div>';
 
   h+='<div class="fld"><label>Sync across phones</label>';
   if(!syncAvailable()){
@@ -932,7 +1085,8 @@ function renderOverlay(animate){
   var sc=overlay.querySelector('.sheet-bd');
   var top=sc?sc.scrollTop:0;
   if(S.sheet)S.sheet.anim=!!animate;
-  overlay.innerHTML=S.unitSheet?unitSheetView():S.propSheet?propSheetView():S.sheet?sheetView():(S.setup?setupView():'');
+  overlay.innerHTML=(S.unitSheet?unitSheetView():S.propSheet?propSheetView():S.sheet?sheetView():(S.setup?setupView():''))
+    +(S.confirm?confirmView():'');
   var sc2=overlay.querySelector('.sheet-bd');
   if(sc2&&top&&!animate)sc2.scrollTop=top}
 
@@ -997,7 +1151,7 @@ function commitEntry(){
   var was=sh.edit;
   saveEnt();S.sheet=null;S.openRow=null;
   renderAll();
-  ping(was?'Entry updated':(rec.type==='rent'?'Rent recorded':rec.type==='given'?'Money given recorded':'Expense recorded'))}
+  ping(was?'Entry updated':(rec.type==='rent'?'Rent recorded':rec.type==='given'?'Money given recorded':rec.type==='received'?'Money received recorded':'Expense recorded'))}
 
 function markPaid(unitId){
   var u=findUnit(unitId);if(!u)return;
@@ -1057,6 +1211,7 @@ document.addEventListener('click',function(ev){
     case 'add-expense': openSheet('expense',null,null);break;
     case 'add-rent': openSheet('rent',null,null);break;
     case 'add-given': openSheet('given',null,null);break;
+    case 'add-received': openSheet('received',null,null);break;
     case 'sheet-close': S.sheet=null;renderOverlay(false);break;
     case 'sheet-type':
       S.sheet.type=v;
@@ -1092,15 +1247,13 @@ document.addEventListener('click',function(ev){
       if(s)openSheet(s.type,s,null);
       break}
     case 'row-del':
-      syncTomb(v);
-      S.entries=S.entries.filter(function(e){return e.id!==v});
-      S.openRow=null;saveEnt();renderApp();ping('Entry deleted');break;
+      S.confirm={title:'Delete this entry?',msg:'It moves to Recently deleted for '+TRASH_DAYS+' days, so you can put it back if this was a mistake.',act:'row-del',val:v,label:'Delete'};
+      renderOverlay(false);break;
 
     case 'unit-paid': markPaid(v);break;
     case 'unit-undo':
-      syncTomb(v);
-      S.entries=S.entries.filter(function(e){return e.id!==v});
-      saveEnt();renderApp();ping('Rent entry removed');break;
+      S.confirm={title:'Remove this rent entry?',msg:'It moves to Recently deleted for '+TRASH_DAYS+' days, so you can put it back.',act:'unit-undo',val:v,label:'Remove'};
+      renderOverlay(false);break;
     case 'unit-enter': openSheet('rent',{unitId:v},null);break;
 
     case 'prop-new': S.propSheet={id:null};renderOverlay(true);break;
@@ -1113,8 +1266,8 @@ document.addEventListener('click',function(ev){
       else{S.cfg.properties.push({id:uid(),name:nm,units:[]})}
       saveCfg();S.propSheet=null;renderOverlay(false);renderApp();ping(v?'Estate renamed':'Estate added');break}
     case 'ps-del':
-      S.cfg.properties=S.cfg.properties.filter(function(p){return p.id!==v});
-      saveCfg();S.propSheet=null;renderOverlay(false);renderApp();ping('Estate deleted');break;
+      S.confirm={title:'Delete this estate?',msg:'The estate and all its units are removed. Payments already recorded stay in your ledger.',act:'ps-del',val:v,label:'Delete'};
+      renderOverlay(false);break;
 
     case 'unit-new': S.unitSheet={propId:v,unitId:null};renderOverlay(true);break;
     case 'unit-open': {var o=v.split('|');S.unitSheet={propId:o[0],unitId:o[1]};renderOverlay(true);break}
@@ -1134,9 +1287,9 @@ document.addEventListener('click',function(ev){
           e.unitLabel=lb;e.tenant=tn;if(pn2)e.propName=pn2.name}});
         saveEnt()}
       saveCfg();S.unitSheet=null;renderOverlay(false);renderApp();ping(w[1]?'Unit updated':'Unit added');break}
-    case 'us-del': {var z=v.split('|');
-      S.cfg.properties.forEach(function(p){if(p.id===z[0])p.units=(p.units||[]).filter(function(u){return u.id!==z[1]})});
-      saveCfg();S.unitSheet=null;renderOverlay(false);renderApp();ping('Unit deleted');break}
+    case 'us-del':
+      S.confirm={title:'Delete this unit?',msg:'The unit is removed from the estate. Rent payments already recorded stay in your ledger.',act:'us-del',val:v,label:'Delete'};
+      renderOverlay(false);break;
 
     case 'person-add': {var pnm=val('person-name');
       if(pnm&&S.cfg.people.indexOf(pnm)<0){S.cfg.people.push(pnm);saveCfg()}
@@ -1144,10 +1297,28 @@ document.addEventListener('click',function(ev){
     case 'person-del':
       if(S.cfg.people.length>1){S.cfg.people=S.cfg.people.filter(function(p){return p!==v});saveCfg()}
       renderOverlay(false);break;
+    case 'cat-add': {var cnm=val('cat-name');
+      if(cnm&&S.cfg.categories.indexOf(cnm)<0){S.cfg.categories.push(cnm);saveCfg()}
+      renderOverlay(false);break}
+    case 'cat-del':
+      S.cfg.categories=S.cfg.categories.filter(function(c){return c!==v});
+      saveCfg();renderOverlay(false);break;
     case 'toggle-given': S.cfg.givenIsSpend=!S.cfg.givenIsSpend;saveCfg();renderOverlay(false);renderApp();break;
 
     case 'sync-in': if(syncAvailable()){window.HisaabSync.signIn();ping('Opening Google sign-in\u2026');}break;
     case 'sync-out': if(syncAvailable()){window.HisaabSync.signOut();SYNC.on=false;SYNC.user=null;store('hisaab:sync',false);renderOverlay(false);ping('Signed out \u00b7 sync paused');}break;
+
+    case 'cf-no': S.confirm=null;renderOverlay(false);break;
+    case 'cf-yes': {var cc=S.confirm;S.confirm=null;if(cc)doConfirmed(cc);break}
+
+    case 'trash-restore':
+      if(restoreEntry(v)){renderAll();ping('Entry restored');}break;
+    case 'trash-purge':
+      S.confirm={title:'Delete for good?',msg:'This entry can\u2019t be recovered afterwards, on either phone.',act:'trash-purge',val:v,label:'Delete forever'};
+      renderOverlay(false);break;
+    case 'trash-empty':
+      S.confirm={title:'Empty the bin?',msg:'All '+TRASH.length+' deleted '+(TRASH.length===1?'entry':'entries')+' will be gone for good on both phones.',act:'trash-empty',val:null,label:'Empty bin'};
+      renderOverlay(false);break;
 
     case 'export': exportFile();break;
     case 'import': {var f=document.getElementById('importer');if(f)f.click();break}
@@ -1170,7 +1341,7 @@ document.addEventListener('input',fieldEdit);
 document.addEventListener('change',fieldEdit);
 document.addEventListener('keydown',function(ev){
   if(ev.key!=='Enter')return;
-  var map={'person-name':'person-add','newcat':'newcat-add','ps-name':'ps-save','us-rent':'us-save'};
+  var map={'person-name':'person-add','newcat':'newcat-add','ps-name':'ps-save','us-rent':'us-save','cat-name':'cat-add'};
   var id=ev.target.id;
   if(map[id]){ev.preventDefault();var b=document.querySelector('[data-a="'+map[id]+'"]');if(b)b.click()}
 });
@@ -1179,7 +1350,7 @@ if('serviceWorker' in navigator && location.protocol==='https:'){
   window.addEventListener('load',function(){navigator.serviceWorker.register('sw.js').catch(function(){})})
 }
 
-pull();applyTheme();renderAll();
+pull();pruneTrash();applyTheme();renderAll();
 
 // bring up cloud sync once the Firebase module has settled
 (function initSync(tries){
